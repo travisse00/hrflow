@@ -1,0 +1,303 @@
+// HRFlow — Prisma schema (MongoDB)
+// Notes:
+//  - One Employee model doubles as the login account (email + passwordHash + role).
+//  - Nothing is hard-deleted: employees are deactivated, so history stays intact.
+//  - Department hierarchy = parentId (forward/backward link) + `path` (materialised
+//    list of ancestor ids) so "walk up" and "is X a descendant of Y" need no recursion.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum Role {
+  ADMIN
+  HR_MANAGER
+  EMPLOYEE
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum LeaveType {
+  ANNUAL
+  SICK
+  CASUAL
+  MATERNITY
+  PATERNITY
+  UNPAID
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// PRIVATE      = employee <-> employee. Never exposed through the hierarchy.
+// ORGANIZATIONAL = anything involving a department (E->D, D->D, D->E).
+enum ConversationKind {
+  PRIVATE
+  ORGANIZATIONAL
+}
+
+enum ParticipantType {
+  EMPLOYEE
+  DEPARTMENT
+}
+
+enum MessageStatus {
+  SENT
+  EDITED
+  DELETED
+}
+
+// ───────────────────────── Employees ─────────────────────────
+
+model Employee {
+  id           String           @id @default(auto()) @map("_id") @db.ObjectId
+  fullName     String
+  email        String           @unique
+  passwordHash String
+  phone        String?
+  position     String
+  role         Role             @default(EMPLOYEE)
+  status       EmploymentStatus @default(ACTIVE)
+  dateJoined   DateTime         @default(now())
+  deactivatedAt DateTime?
+  profileImage String?
+
+  departmentId String?     @db.ObjectId
+  department   Department? @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Departments this employee currently heads (usually 0 or 1)
+  headedDepartments Department[] @relation("DepartmentHead")
+
+  attendance       Attendance[]
+  leaveRequests    LeaveRequest[]        @relation("LeaveRequester")
+  reviewedLeaves   LeaveRequest[]        @relation("LeaveReviewer")
+  participations   ConversationParticipant[]
+  sentMessages     Message[]
+  uploads          Attachment[]
+  reactions        MessageReaction[]
+  auditLogs        AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departmentId])
+  @@index([status])
+  @@index([role])
+  @@index([fullName])
+}
+
+// ───────────────────────── Departments ─────────────────────────
+
+model Department {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+
+  // Backward link: who is my parent? (null = top-level, directly under the Organization)
+  parentId String?     @db.ObjectId
+  parent   Department? @relation("DepartmentTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  // Forward link: who are my children?
+  children Department[] @relation("DepartmentTree")
+
+  // Ancestor ids, nearest parent first: Recruitment.path = [HR]  (HR.path = [])
+  // Lets us answer "who is above me?" and "am I inside X?" with a single query.
+  path  String[] @db.ObjectId
+  depth Int      @default(0)
+
+  headId String?   @db.ObjectId
+  head   Employee? @relation("DepartmentHead", fields: [headId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  members       Employee[]                @relation("DepartmentMembers")
+  participations ConversationParticipant[]
+  sentMessages  Message[]                 @relation("MessageSenderDepartment")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Sibling names must be unique under the same parent.
+  @@unique([parentId, name])
+  @@index([parentId])
+  @@index([path])
+  @@index([headId])
+}
+
+// ───────────────────────── Attendance ─────────────────────────
+
+// One row per employee per calendar day.
+// `dayKey` is a "YYYY-MM-DD" string in the organisation's timezone, so the
+// unique index below is what actually prevents duplicate clock-ins (race-safe).
+// State machine:  (no row) -> clockIn set -> clockOut set (terminal for the day)
+model Attendance {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  employeeId String    @db.ObjectId
+  employee   Employee  @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  dayKey     String
+  clockIn    DateTime
+  clockOut   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([employeeId, dayKey])
+  @@index([dayKey])
+  @@index([employeeId, clockIn])
+}
+
+// ───────────────────────── Leave ─────────────────────────
+
+model LeaveRequest {
+  id          String      @id @default(auto()) @map("_id") @db.ObjectId
+  type        LeaveType
+  startDate   DateTime
+  endDate     DateTime
+  reason      String
+  status      LeaveStatus @default(PENDING)
+  submittedAt DateTime    @default(now())
+
+  requesterId String   @db.ObjectId
+  requester   Employee @relation("LeaveRequester", fields: [requesterId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Review info (filled when status leaves PENDING)
+  reviewerId String?   @db.ObjectId
+  reviewer   Employee? @relation("LeaveReviewer", fields: [reviewerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reviewedAt DateTime?
+  reviewNote String?
+
+  updatedAt DateTime @updatedAt
+
+  @@index([requesterId, status])
+  @@index([status, submittedAt])
+  @@index([startDate, endDate])
+}
+
+// ───────────────────────── Messaging ─────────────────────────
+//
+// Conversation ── ConversationParticipant (employee OR department)
+//             └── Message ── Attachment
+//                         └── MessageReaction
+
+model Conversation {
+  id      String           @id @default(auto()) @map("_id") @db.ObjectId
+  kind    ConversationKind
+  subject String?
+
+  // Required + unique on purpose. MongoDB treats a missing value as null, and a unique
+  // index allows only ONE null, so an optional unique field would break after the first
+  // organizational conversation.
+  //   PRIVATE        -> "dm:<idA>:<idB>" (ids sorted): exactly one private thread per pair
+  //   ORGANIZATIONAL -> "org:<random uuid>": always unique
+  threadKey String @unique
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([kind, lastMessageAt])
+}
+
+model ConversationParticipant {
+  id             String          @id @default(auto()) @map("_id") @db.ObjectId
+  conversationId String          @db.ObjectId
+  conversation   Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  type           ParticipantType
+
+  // Exactly one of these is set, matching `type` (enforced in the service layer).
+  employeeId   String?     @db.ObjectId
+  employee     Employee?   @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  departmentId String?     @db.ObjectId
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  lastReadAt DateTime?
+  joinedAt   DateTime  @default(now())
+
+  @@unique([conversationId, employeeId, departmentId])
+  @@index([employeeId])
+  @@index([departmentId])
+}
+
+model Message {
+  id             String       @id @default(auto()) @map("_id") @db.ObjectId
+  conversationId String       @db.ObjectId
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  senderId String   @db.ObjectId
+  sender   Employee @relation(fields: [senderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Set when an authorised user speaks AS a department (D->D, D->E).
+  senderDepartmentId String?     @db.ObjectId
+  senderDepartment   Department? @relation("MessageSenderDepartment", fields: [senderDepartmentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  content   String
+  status    MessageStatus @default(SENT)
+  createdAt DateTime      @default(now())
+  editedAt  DateTime?
+
+  attachments Attachment[]
+  reactions   MessageReaction[]
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+model Attachment {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  messageId    String?  @db.ObjectId
+  message      Message? @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  uploaderId   String   @db.ObjectId
+  uploader     Employee @relation(fields: [uploaderId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  originalName String
+  mimeType     String
+  size         Int
+  // Opaque object key in storage — never a public URL. Files are served through an
+  // authorised route handler that checks conversation access first.
+  storageKey   String   @unique
+  uploadedAt   DateTime @default(now())
+
+  @@index([messageId])
+  @@index([uploaderId])
+}
+
+model MessageReaction {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  messageId  String   @db.ObjectId
+  message    Message  @relation(fields: [messageId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  employeeId String   @db.ObjectId
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  emoji      String
+  createdAt  DateTime @default(now())
+
+  @@unique([messageId, employeeId, emoji])
+}
+
+// ───────────────────────── Audit log ─────────────────────────
+
+model AuditLog {
+  id         String    @id @default(auto()) @map("_id") @db.ObjectId
+  actorId    String?   @db.ObjectId
+  actor      Employee? @relation(fields: [actorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  action     String // e.g. "EMPLOYEE_DEACTIVATED", "LEAVE_APPROVED"
+  entityType String // e.g. "Employee", "Department", "LeaveRequest"
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime  @default(now())
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([entityType, entityId])
+}

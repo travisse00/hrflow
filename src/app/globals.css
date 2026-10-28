@@ -1,26 +1,99 @@
 @import "tailwindcss";
 
+/* ───────── Theme tokens ─────────
+   Light  = green + white
+   Dark   = green + black
+   With no saved choice we follow the OS setting; the toggle saves a choice
+   in localStorage and sets data-theme on <html>. */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+  --background: #f4faf6;
+  --surface: #ffffff;
+  --foreground: #0b1a10;
+  --muted: #55675b;
+  --border: #d5e6da;
+  --soft: #dcfce7;
+  --primary: #15803d;
+  --primary-hover: #166534;
+  --primary-fg: #ffffff;
+  --primary-text: #15803d;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+  --warning: #b45309;
+  --warning-bg: #fef3c7;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #050806;
+  --surface: #0d130f;
+  --foreground: #e8f3ec;
+  --muted: #8fa395;
+  --border: #1d2a21;
+  --soft: #0f2a18;
+  --primary: #22c55e;
+  --primary-hover: #4ade80;
+  --primary-fg: #04110a;
+  --primary-text: #4ade80;
+  --danger: #f87171;
+  --danger-bg: #2a1212;
+  --danger-border: #5b2020;
+  --warning: #fbbf24;
+  --warning-bg: #2a2108;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --background: #050806;
+    --surface: #0d130f;
+    --foreground: #e8f3ec;
+    --muted: #8fa395;
+    --border: #1d2a21;
+    --soft: #0f2a18;
+    --primary: #22c55e;
+    --primary-hover: #4ade80;
+    --primary-fg: #04110a;
+    --primary-text: #4ade80;
+    --danger: #f87171;
+    --danger-bg: #2a1212;
+    --danger-border: #5b2020;
+    --warning: #fbbf24;
+    --warning-bg: #2a2108;
   }
+}
+
+/* Makes the tokens usable as Tailwind classes: bg-surface, text-muted, border-border... */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-soft: var(--soft);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-fg: var(--primary-fg);
+  --color-primary-text: var(--primary-text);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-border: var(--danger-border);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
